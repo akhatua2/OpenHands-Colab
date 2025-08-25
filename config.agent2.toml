@@ -1,0 +1,23 @@
+# OpenHands Configuration for Agent 2
+[core]
+max_iterations = 20
+agent = "CodeActAgent"
+enable_mcp = true
+save_trajectory_path = "logs"
+
+[llm]
+model = "gpt-4o"
+# api_key = "your-openai-api-key-here"
+
+[mcp]
+stdio_servers = [
+    {name="collaboration", command="python", args=["mcp_server.py"]}
+]
+
+[sandbox]
+base_container_image = "openhands"
+use_host_network = false
+enable_auto_lint = true
+volumes = "/Users/arpan/Desktop/OpenHands-Colab/workspace1:/workspace:rw"
+
+

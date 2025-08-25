@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import os
 import time
 import traceback
@@ -62,6 +63,7 @@ from openhands.events.action import (
     FileEditAction,
     FileReadAction,
     IPythonRunCellAction,
+    MCPAction,
     MessageAction,
     NullAction,
     SystemMessageAction,
@@ -84,6 +86,8 @@ from openhands.llm.metrics import Metrics
 from openhands.runtime.runtime_status import RuntimeStatus
 from openhands.server.services.conversation_stats import ConversationStats
 from openhands.storage.files import FileStore
+
+logger = logging.getLogger(__name__)
 
 # note: RESUME is only available on web GUI
 TRAFFIC_CONTROL_REMINDER = (
@@ -155,6 +159,11 @@ class AgentController:
         self.user_id = user_id
         self.file_store = file_store
         self.agent = agent
+        # Set collaboration agent ID for multi-agent communication
+        # Use environment variable AGENT_ID (1, 2, 3, etc.)
+        import os
+        self.collaboration_agent_id = os.environ.get('AGENT_ID')
+        logger.debug(f"🔍 AGENT_ID environment variable: {self.collaboration_agent_id}")
         self.headless_mode = headless_mode
         self.is_delegate = is_delegate
         self.conversation_stats = conversation_stats
@@ -508,6 +517,29 @@ class AgentController:
                 )
                 await self.delegate.set_agent_state_to(AgentState.RUNNING)
             return
+
+        elif isinstance(action, MCPAction):
+            # Auto-inject agent_id for collaboration tools
+            logger.debug(f"🔍 MCPAction detected: {action.name}, agent_id={self.collaboration_agent_id}")
+            logger.debug(f"🔍 Action arguments before injection: {action.arguments}")
+
+            if action.name in ['collaboration_send'] and self.collaboration_agent_id:
+                if 'agent_id' not in action.arguments:
+                    action.arguments['agent_id'] = self.collaboration_agent_id
+                    logger.info(f"✅ Injected agent_id '{self.collaboration_agent_id}' into {action.name}")
+                else:
+                    logger.debug(f"🔍 agent_id already present: {action.arguments['agent_id']}")
+            elif action.name in ['collaboration_get_messages'] and self.collaboration_agent_id:
+                if 'agent_id' not in action.arguments:
+                    action.arguments['agent_id'] = self.collaboration_agent_id
+                    logger.info(f"✅ Injected agent_id '{self.collaboration_agent_id}' into {action.name}")
+                else:
+                    logger.debug(f"🔍 agent_id already present: {action.arguments['agent_id']}")
+            else:
+                logger.debug(f"🔍 No injection needed for {action.name} (agent_id={self.collaboration_agent_id})")
+
+            logger.debug(f"🔍 Action arguments after injection: {action.arguments}")
+            # Let the runtime handle the MCP action normally
 
         elif isinstance(action, AgentFinishAction):
             self.state.outputs = action.outputs
@@ -866,6 +898,9 @@ class AgentController:
             # instead, we replay the action from the replay trajectory
             action = self._replay_manager.step()
         else:
+            # Auto-fetch collaboration messages from other agents
+            await self._fetch_collaboration_messages()
+
             try:
                 action = self.agent.step(self.state)
                 if action is None:
@@ -1200,3 +1235,29 @@ class AgentController:
 
     def save_state(self):
         self.state_tracker.save_state()
+
+    async def _fetch_collaboration_messages(self):
+        """Fetch unread messages from other agents via MCP and add to event stream."""
+        try:
+            # Create get_messages action using collaboration agent ID
+            from openhands.events.action import MCPAction
+            get_messages_action = MCPAction(
+                name='collaboration_get_messages',
+                arguments={'agent_id': self.collaboration_agent_id}
+            )
+
+            # Execute MCP action through runtime
+            if hasattr(self.event_stream, 'runtime'):
+                runtime = self.event_stream.runtime
+                observation = await runtime.call_tool_mcp(get_messages_action)
+
+                # If we got messages, add them to event stream
+                if hasattr(observation, 'content') and observation.content.strip():
+                    from openhands.events.action import MessageAction
+                    message_action = MessageAction(content=observation.content)
+                    self.event_stream.add_event(message_action, EventSource.USER)
+
+        except Exception as e:
+            # Silently handle errors to not disrupt agent workflow
+            logger.debug(f'Collaboration message fetch failed: {e}')
+            pass

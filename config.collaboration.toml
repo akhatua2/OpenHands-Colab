@@ -1,0 +1,26 @@
+# OpenHands Configuration for Multi-Agent Collaboration
+# Example showing minimal MCP setup for agent collaboration
+
+[core]
+max_iterations = 100
+agent = "CodeActAgent"
+enable_mcp = true
+save_trajectory_path = "logs"
+
+[llm]
+model = "gpt-4o"
+# api_key = "your-openai-api-key-here"
+
+[mcp]
+# Add collaboration MCP server
+stdio_servers = [
+    {name="collaboration", command="python", args=["mcp_server.py"], env={}}
+]
+
+[runtime]
+runtime_type = "EventStreamRuntime"
+
+[sandbox]
+base_container_image = "openhands"
+use_host_network = false
+enable_auto_lint = true

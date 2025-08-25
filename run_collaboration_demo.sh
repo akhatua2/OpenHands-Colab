@@ -17,8 +17,8 @@ if [ -z "$OPENAI_API_KEY" ]; then
     exit 1
 fi
 
-# Create separate workspaces
-mkdir -p workspace1 workspace2
+# Create workspaces and shared directory for SQLite database
+mkdir -p workspace1 workspace2 shared
 
 echo "🚀 Starting Agent 1 (Calculator Implementation) in workspace1/..."
 WORKSPACE_DIR="/workspace" AGENT_ID="1" python -m openhands.core.main \

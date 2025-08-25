@@ -8,6 +8,8 @@ import asyncio
 import json
 import sys
 import logging
+import sqlite3
+import os
 from typing import Any, Dict, List
 from datetime import datetime
 
@@ -24,9 +26,34 @@ logging.basicConfig(
 logging.getLogger().handlers[1].setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
-# Simple in-memory message storage
-messages: List[Dict[str, Any]] = []
-message_readers: Dict[str, int] = {}  # agent_id -> last_read_index
+# SQLite database for shared message storage across containers
+DB_PATH = "./shared/collaboration.db"
+
+def init_database():
+    """Initialize SQLite database with messages table."""
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Create messages table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender TEXT NOT NULL,
+            message TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            read_by TEXT DEFAULT ''  -- JSON array of agent_ids who have read this message
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+    logger.info(f"📊 Database initialized at {DB_PATH}")
+
+def get_db_connection():
+    """Get a database connection."""
+    return sqlite3.connect(DB_PATH)
 
 
 async def handle_mcp_request(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -110,16 +137,20 @@ async def handle_mcp_request(request: Dict[str, Any]) -> Dict[str, Any]:
 
         if tool_name == "send":
             # Store message with timestamp
-            # agent_id is now required
-            message = {
-                "sender": arguments.get("agent_id", "unknown"),
-                "message": arguments.get("message", ""),
-                "timestamp": datetime.now().isoformat()
-            }
-            messages.append(message)
+            # Store message in SQLite database
+            sender = arguments.get("agent_id", "unknown")
+            message_text = arguments.get("message", "")
 
-            logger.info(f"📤 Message stored from {message['sender']}: {message['message']}")
-            logger.info(f"📊 Total messages in storage: {len(messages)}")
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO messages (sender, message) VALUES (?, ?)",
+                (sender, message_text)
+            )
+            conn.commit()
+            conn.close()
+
+            logger.info(f"📤 Message stored in DB from {sender}: {message_text}")
 
             response = {
                 "jsonrpc": "2.0",
@@ -128,7 +159,7 @@ async def handle_mcp_request(request: Dict[str, Any]) -> Dict[str, Any]:
                     "content": [
                         {
                             "type": "text",
-                            "text": f"✅ Message sent: {message['message']}"
+                            "text": f"✅ Message sent: {message_text}"
                         }
                     ]
                 }
@@ -138,32 +169,51 @@ async def handle_mcp_request(request: Dict[str, Any]) -> Dict[str, Any]:
 
         elif tool_name == "get_messages":
             agent_id = arguments.get("agent_id", "unknown")
-            last_read = message_readers.get(agent_id, 0)
 
-            logger.info(f"📥 Getting messages for {agent_id}, last_read: {last_read}")
+            logger.info(f"📥 Getting unread messages for {agent_id}")
+
+            conn = get_db_connection()
+            cursor = conn.cursor()
 
             # Get unread messages from other agents
-            unread = [
-                msg for i, msg in enumerate(messages[last_read:], last_read)
-                if msg["sender"] != agent_id
-            ]
+            cursor.execute("""
+                SELECT id, sender, message, timestamp, read_by
+                FROM messages
+                WHERE sender != ?
+                AND (read_by NOT LIKE ? OR read_by = '')
+                ORDER BY timestamp ASC
+            """, (agent_id, f"%{agent_id}%"))
 
-            logger.info(f"📨 Found {len(unread)} unread messages for {agent_id}")
-            for msg in unread:
-                logger.debug(f"  - {msg['sender']}: {msg['message']} ({msg['timestamp']})")
+            unread_rows = cursor.fetchall()
 
-            # Update read position
-            message_readers[agent_id] = len(messages)
-            logger.debug(f"Updated read position for {agent_id} to {len(messages)}")
+            logger.info(f"📨 Found {len(unread_rows)} unread messages for {agent_id}")
 
-            if unread:
+            if unread_rows:
+                # Mark messages as read by this agent
+                for row in unread_rows:
+                    msg_id, sender, message, timestamp, read_by = row
+                    current_read_by = read_by or ""
+
+                    # Add this agent to read_by list if not already there
+                    if agent_id not in current_read_by:
+                        updated_read_by = f"{current_read_by},{agent_id}".strip(',')
+                        cursor.execute(
+                            "UPDATE messages SET read_by = ? WHERE id = ?",
+                            (updated_read_by, msg_id)
+                        )
+                        logger.debug(f"Marked message {msg_id} as read by {agent_id}")
+
                 content = "\n".join([
-                    f"[STATUS] {msg['sender']}: {msg['message']}"
-                    for msg in unread
+                    f"[STATUS] {row[1]}: {row[2]}"  # sender: message
+                    for row in unread_rows
                 ])
+                logger.info(f"📬 Returning {len(unread_rows)} messages to {agent_id}")
             else:
                 content = ""
                 logger.info(f"No new messages for {agent_id}")
+
+            conn.commit()
+            conn.close()
 
             response = {
                 "jsonrpc": "2.0",
@@ -243,4 +293,6 @@ async def main():
 
 
 if __name__ == "__main__":
+    # Initialize database before starting server
+    init_database()
     asyncio.run(main())

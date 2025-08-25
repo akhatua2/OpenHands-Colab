@@ -18,6 +18,6 @@ stdio_servers = [
 base_container_image = "openhands"
 use_host_network = false
 enable_auto_lint = true
-volumes = "/Users/arpan/Desktop/OpenHands-Colab/workspace1:/workspace:rw"
+volumes = "/Users/arpan/Desktop/OpenHands-Colab/workspace1:/workspace:rw,/Users/arpan/Desktop/OpenHands-Colab/shared:/app/shared:rw"
 
 
